@@ -1,6 +1,6 @@
-# <center>🚗 Road Judge AI</center>
+# <div align="center">🚗 Road Judge AI</div>
 
-### <center>:oncoming_automobile: AI 기반 교통사고 과실 비율 분석 및 운전 습관 케어 서비스</center>
+### <div align="center">:oncoming_automobile: AI 기반 교통사고 과실 비율 분석 및 운전 습관 케어 서비스</div>
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)
