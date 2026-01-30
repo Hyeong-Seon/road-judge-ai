@@ -2,12 +2,11 @@
 
 ### <div align="center">:oncoming_automobile: AI 기반 교통사고 과실 비율 분석 및 운전 습관 케어 서비스</div>
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)
-![YOLOv8](https://img.shields.io/badge/YOLOv8-00FFFF?logo=yolo&logoColor=black)
-![MMAction2](https://img.shields.io/badge/MMAction2-blueviolet)
-![Status](https://img.shields.io/badge/Status-In%20Progress-green)
+<div align="center">
 
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white) ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white) ![YOLOv8](https://img.shields.io/badge/YOLOv8-00FFFF?logo=yolo&logoColor=black) ![MMAction2](https://img.shields.io/badge/MMAction2-blueviolet) ![Status](https://img.shields.io/badge/Status-In%20Progress-green)
+
+</div>
 <div align="center">
   <img src="https://via.placeholder.com/600x200?text=Road+Judge+AI+Logo" alt="Logo" width="100%">
   <br><br>
