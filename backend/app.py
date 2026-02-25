@@ -50,7 +50,7 @@ CORS(app)
 # ══════════════════════════════════════════════════════════
 # 📂 경로 및 모델 설정
 # ══════════════════════════════════════════════════════════
-BASE_DIR = "/home/ubuntu/ai-muncheol"
+BASE_DIR = "/home/ubuntu/ai-muncheol/backend"
 
 MODEL_META = {
     1: {"k": 5,  "out_key": "accident_place",              "prob_key": "probability", "map_key": "model1", "db_map": "place", "label": "장소"},
@@ -71,8 +71,8 @@ for name_kr, prefix in GROUPS.items():
         meta = MODEL_META[i]
         
         MODELS_CONFIG[key] = {
-            "config": os.path.join(BASE_DIR, f"{key}_config.py"),
-            "checkpoint": os.path.join(BASE_DIR, f"{key}.pth"),
+            "config": os.path.join(BASE_DIR, "configs", f"{key}_config.py"),
+            "checkpoint": os.path.join(BASE_DIR, "weights", f"{key}.pth"),
             "meta": meta,
             "group": name_kr
         }
@@ -124,7 +124,7 @@ def load_csv_labels():
     global CRASH_DF, LABEL_MAP_TYPE, LABEL_MAP_ACTION
 
     csv_candidates = [
-        os.path.join(BASE_DIR, "matching.csv"),
+        os.path.join(BASE_DIR, "data", "matching.csv"),
     ]
 
     df = pd.DataFrame()

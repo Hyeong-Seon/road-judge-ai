@@ -15,8 +15,8 @@ import os
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") # 이렇게 바꿔주세요
 #pdf_path = "/content/drive/MyDrive/cv_final/데이터 관련/1-56_교통사고 영상 데이터_과실비율 내용 정리.pdf"
 #csv_gt_path = "/content/drive/MyDrive/cv_final/데이터 관련/블랙박스_AB여부.csv" # 업로드하신 정답지 경로
-mapping_path = "/home/ubuntu/ai-muncheol/matching2.csv"
-csv_type_path='/home/ubuntu/ai-muncheol/accident_type.csv'
+mapping_path = "/home/ubuntu/ai-muncheol/backend/data/matching.csv"
+csv_type_path = "/home/ubuntu/ai-muncheol/backend/data/accident_type.csv"
 
 #base_video_root = "/content/cache/val/"
 #base_label_root = "/content/cache/pred/"
