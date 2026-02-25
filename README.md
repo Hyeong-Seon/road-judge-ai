@@ -6,7 +6,7 @@
 ![Flask](https://img.shields.io/badge/Flask-2.0-black?logo=flask&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-EE4C2C?logo=pytorch&logoColor=white)
 ![MMAction2](https://img.shields.io/badge/MMAction2-1.0-lightgrey?logo=opencollective)
-![YOLOv8](https://img.shields.io/badge/YOLOv8-Object_Detection-orange?logo=yolo)
+
 
 > **"몇 대 몇?"** > 블랙박스 영상을 입력받아 AI가 사고 상황을 정밀 분석하고, 대한민국 법원 판례 기반의 과실 비율을 예측해주는 서비스입니다.
 
