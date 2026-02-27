@@ -43,7 +43,7 @@ graph LR
     %% =====================
     subgraph MAE_BOX [ ]
         direction TB
-        MC1[후보 생성(multi outputs)]
+        MC1[후보 생성"(multi outputs)"]
         MC2[내부 집계 및 랭킹]
         M_EXIT[최종 후보]
         MC1 --> MC2 --> M_EXIT
@@ -60,7 +60,7 @@ graph LR
     %% =====================
     subgraph I3D_BOX [ ]
         direction TB
-        IC1[후보 생성(multi outputs)]
+        IC1[후보 생성"(multi outputs)"]
         IC2[내부 집계 및 랭킹]
         I_EXIT[최종 후보]
         IC1 --> IC2 --> I_EXIT
