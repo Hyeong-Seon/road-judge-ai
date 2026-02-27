@@ -193,11 +193,11 @@ pm2 save
 
 | Name | Role | Profile |
 |:---:|:---:|:---:|
-| **나형선** | Backend / Frontend / AI | |
-| **송수민** | Backend / Frontend / AI | |
-| **이예영** | Backend / Frontend / AI | |
-| **임은석** | Backend / Frontend / AI | |
-| **함성민** | Backend / Frontend / AI | |
+| **나형선** | 4-Stage 모델 학습 및 성능 개선 / Backend | |
+| **송수민** | 통합 판단 모델 학습 및 성능 개선 / Frontend | |
+| **이예영** | 학습 유형별 최종후보 선정 알고리즘 개발 | |
+| **임은석** | 4-Stage 모델 학습 및 성능 개선 | |
+| **함성민** | VLM 모델 학습 및 성능 개선 | |
 
 
 ---
