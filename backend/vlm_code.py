@@ -11,12 +11,31 @@ import itertools
 import math
 import ast
 
-import os
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") # 이렇게 바꿔주세요
+from dotenv import load_dotenv
+load_dotenv('/home/ubuntu/ai-muncheol/backend/.env')
+
+try:
+    from google.colab import userdata
+    GOOGLE_API_KEY = userdata.get('GOOGLE_API_KEY')
+except ImportError:
+    # Colab 환경이 아닐 경우(로컬 등) 환경 변수에서 읽어오도록 설정
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# API 설정 및 모델 선언은 그대로 유지
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY, transport='rest')
+else:
+    print("⚠️ 경고: API 키를 찾을 수 없습니다.")
+
+
 #pdf_path = "/content/drive/MyDrive/cv_final/데이터 관련/1-56_교통사고 영상 데이터_과실비율 내용 정리.pdf"
 #csv_gt_path = "/content/drive/MyDrive/cv_final/데이터 관련/블랙박스_AB여부.csv" # 업로드하신 정답지 경로
-mapping_path = "/home/ubuntu/ai-muncheol/backend/data/matching.csv"
-csv_type_path = "/home/ubuntu/ai-muncheol/backend/data/accident_type.csv"
+mapping_path = "/home/ubuntu/ai-muncheol/backend/data/matching2.csv"
+mapping_df = pd.read_csv(mapping_path, encoding='cp949')
+csv_type_path='/home/ubuntu/ai-muncheol/backend/data/accident_type.csv'
+
+#current_model_name = "gemini-3.1-pro-preview"
+current_model_name = "gemini-3-flash-preview"
 
 #base_video_root = "/content/cache/val/"
 #base_label_root = "/content/cache/pred/"
@@ -367,16 +386,16 @@ system_instruction_explanation_direct = """
 3) 영상 관찰은 '보강 설명'으로만 사용
 - 영상은 확정 유형 설명을 더 구체적으로 만드는 용도로만 사용한다.
 - 영상에서 확실하지 않은 내용은 단정하지 말고 '확인 어려움'으로 쓴다.
-- 화질/가림/야간/원거리 등으로 불명확하면 불확실성을 명시한다.
+- 화질/가림/야간/원거리 등의 상황이라면 불확실성을 명시한다.
 
-4) 서술 톤
-- 한국어로 작성한다.
-- 설명은 자연스럽고 간결하게 작성한다.
-- 법률 자문처럼 단정하지 말고, '입력된 유형 기준/비율 기준'에 따른 설명임을 유지한다.
+4) 서술의 어조는 일관적으로 유지
+- 시작과 끝 문구를 포함한 전체적인 서술 톤은 유저 프롬프트의 [어조 및 템플릿 지침]을 최우선으로 따른다.
 
 5) 출력 형식
 - 코드펜스 없이 JSON 객체 1개만 출력한다.
 - output_format에 정의된 키 이름을 그대로 사용한다.
+- 'explanation_text' 작성 시, 제공된 템플릿의 {{ }} 자리에 입력 데이터(날씨, 시간, 기동, 비율 등)를 정확히 매핑하여 치환한다.
+- 템플릿의 변수 값을 임의로 변경하거나 누락하지 않는다.
 """
 
 output_format_explanation_direct = """
@@ -402,105 +421,107 @@ output_format_explanation_direct = """
       "불확실한 점 1 (없으면 '없음')"
     ]
   },
-  "explanation_text": "사용자에게 보여줄 최종 설명 문단. 반드시 'A 차량', 'B 차량' 표현만 사용하고, 입력된 과실비율(A/B)을 포함해 자연스럽게 설명.",
+  "explanation_text": "반드시 지정된 시작 문구로 시작하고, 지정된 마침 문구로 끝나는 전체 설명 문단. 중간에는 사고 정황을 상세히 포함할 것."
 }
 """
 
 ## VLM용 함수 모음
 
-def process_single_json_to_csv(json_path, output_path, csv_type_path='/content/drive/MyDrive/cv_final/데이터 관련/accident_type.csv'):
+# ==========================================
+# 1. 고정 설정 (상수)
+# ==========================================
+SCORE_MODE = 'log'
+EUNSEOK_WEIGHT = 1.0
+HYUNGSUN_WEIGHT = 1.0
+MODEL_WEIGHTS = [1.2, 1.0, 1.0, 0.8]
+EPSILON = 1e-9
+
+MODEL_MAP = {
+    'model1_place': {'attr': 'accident_place', 'e_id': 'accident_place', 'e_prob': 'probability', 'h_id': 'accident_place', 'h_prob': 'probability'},
+    'model2_feature': {'attr': 'accident_place_feature', 'e_id': 'accident_place_feature_code', 'e_prob': 'probability', 'h_id': 'accident_place_feature_code', 'h_prob': 'probability'},
+    'model3_vehicle_a': {'attr': 'vehicle_a_progress_info', 'e_id': 'vehicle_a_code', 'e_prob': 'prob', 'h_id': 'vehicle_a_code', 'h_prob': 'prob'},
+    'model4_vehicle_b': {'attr': 'vehicle_b_progress_info', 'e_id': 'vehicle_b_code', 'e_prob': 'prob', 'h_id': 'vehicle_b_info_code', 'h_prob': 'probability'}
+}
+TARGET_ATTRIBUTES = ['accident_place', 'accident_place_feature', 'vehicle_a_progress_info', 'vehicle_b_progress_info']
+
+# 유효 조합 로드 (전역 1회 실행)
+VALID_COMBINATIONS = None
+if os.path.exists(csv_type_path):
+    df_valid = pd.read_csv(csv_type_path)
+    VALID_COMBINATIONS = set(zip(df_valid['accident_place'], df_valid['accident_place_feature'], 
+                                 df_valid['vehicle_a_progress_info'], df_valid['vehicle_b_progress_info']))
+
+def get_all_predictions_simple(input_data):
     """
-    JSON 파일 1개를 입력받아 통합 분석 점수를 계산하고 CSV 파일 1개를 생성합니다.
+    input_data를 받아 (은석_1위, 형선_1위, 통합_1위, 통합_2위)를 리턴합니다.
     """
-    # --- 설정 값 ---
-    SCORE_MODE = 'log'
-    EUNSEOK_WEIGHT, HYUNGSUN_WEIGHT = 1.0, 1.0
-    MODEL_WEIGHTS = [1.2, 1.0, 1.0, 0.8]
-    EPSILON = 1e-6
-    TARGET_ATTRIBUTES = ['accident_place', 'accident_place_feature', 'vehicle_a_progress_info', 'vehicle_b_progress_info']
-    MODEL_MAP = {
-        'model1_place': {'attr': 'accident_place', 'e_id': 'accident_place', 'h_id': 'accident_place'},
-        'model2_feature': {'attr': 'accident_place_feature', 'e_id': 'accident_place_feature_code', 'h_id': 'accident_place_feature_code'},
-        'model3_vehicle_a': {'attr': 'vehicle_a_progress_info', 'e_id': 'vehicle_a_code', 'h_id': 'vehicle_a_code'},
-        'model4_vehicle_b': {'attr': 'vehicle_b_progress_info', 'e_id': 'vehicle_b_code', 'h_id': 'vehicle_b_info_code'}
-    }
+    try:
+        # 1. 데이터 구조화
+        model_data = {attr: {'probs': {'은석': {}, '형선': {}}} for attr in TARGET_ATTRIBUTES}
+        model_keys = ['model1_place', 'model2_feature', 'model3_vehicle_a', 'model4_vehicle_b']
+        
+        for person in ["은석", "형선"]:
+            person_data = input_data.get(person, [])
+            for i, model_results in enumerate(person_data):
+                m_key = model_keys[i]
+                m_info = MODEL_MAP[m_key]
+                attr = m_info['attr']
+                id_key = m_info['e_id'] if person == "은석" else m_info['h_id']
+                prob_key = m_info['e_prob'] if person == "은석" else m_info['h_prob']
+                
+                for item in model_results:
+                    code = item.get(id_key)
+                    prob = item.get(prob_key, 0)
+                    model_data[attr]['probs'][person][code] = prob
 
-    # 1. 유효 조합 로드
-    valid_combinations = None
-    if os.path.exists(csv_type_path):
-        df_valid = pd.read_csv(csv_type_path)
-        valid_combinations = set(zip(df_valid[TARGET_ATTRIBUTES[0]], df_valid[TARGET_ATTRIBUTES[1]],
-                                     df_valid[TARGET_ATTRIBUTES[2]], df_valid[TARGET_ATTRIBUTES[3]]))
-
-    # 2. JSON 데이터 로드
-    #with open(json_path, 'r', encoding='utf-8') as f:
-    #    data = json.load(f)
-
-    #video = data.get('video', {})
-    #gt = tuple(video.get(a) for a in TARGET_ATTRIBUTES)
-    #preds = data.get('predictions', {})
-
-    # 3. 모델별 확률 데이터 구조화
-    model_data = {attr: {'probs': {'은석': {}, '형선': {}}} for attr in TARGET_ATTRIBUTES}
-    for m_key, m_info in MODEL_MAP.items():
-        m_val = preds.get(m_key, {})
-        attr = m_info['attr']
-        # 은석/형선 데이터 파싱 (e_prob/h_prob 키 이름 차이 대응)
-        for expert, k_id, k_prob in [('은석', m_info['e_id'], 'probability' if 'model4' not in m_key else 'prob'),
-                                     ('형선', m_info['h_id'], 'probability' if 'model3' not in m_key else 'prob')]:
-            # 원본 코드의 미묘한 키 명칭 차이 통합 (필요시 m_info에 명시적으로 추가 가능)
-            p_key = 'prob' if (expert == '은석' and 'model3' in m_key) or (expert == '형선' and 'model3' in m_key) else 'probability'
-            for item in m_val.get(f'{expert}_pred', []):
-                model_data[attr]['probs'][expert][item.get(k_id)] = item.get(p_key, 0)
-
-    # 4. 분석 DF 생성 함수
-    def get_df(mode):
+        # 2. 조합 및 점수 계산
         c_lists = [list(set(model_data[a]['probs']['은석'].keys()) | set(model_data[a]['probs']['형선'].keys())) for a in TARGET_ATTRIBUTES]
-        res = []
-        for comb in itertools.product(*c_lists):
-            if valid_combinations and comb not in valid_combinations: continue
+        
+        best_e = {"comb": None, "score": -float('inf')}
+        best_h = {"comb": None, "score": -float('inf')}
+        
+        # 통합 점수 랭킹을 위해 모든 조합의 점수를 저장
+        total_scores = []
 
-            # Score 계산 (Log 모드 기준)
+        for comb in itertools.product(*c_lists):
+            if VALID_COMBINATIONS is not None and comb not in VALID_COMBINATIONS:
+                continue
+
+            # Log Score 계산
             raw_e = sum(MODEL_WEIGHTS[i] * math.log(model_data[TARGET_ATTRIBUTES[i]]['probs']['은석'].get(comb[i], 0) + EPSILON) for i in range(4))
             raw_h = sum(MODEL_WEIGHTS[i] * math.log(model_data[TARGET_ATTRIBUTES[i]]['probs']['형선'].get(comb[i], 0) + EPSILON) for i in range(4))
-
+            
+            # 가중치 반영 (1:1 비율)
             weighted_e = raw_e * EUNSEOK_WEIGHT
             weighted_h = raw_h * HYUNGSUN_WEIGHT
+            integrated = weighted_e + weighted_h
 
-            res.append({
-                '순위': 0, '정답여부': 'O' if comb == gt else 'X',
-                **{attr: val for attr, val in zip(TARGET_ATTRIBUTES, comb)},
-                '은석_score': round(weighted_e, 4), '형선_score': round(weighted_h, 4),
-                '통합_score': round(weighted_e + weighted_h, 8)
-            })
+            # 개별 모델 1위 추적
+            if weighted_e > best_e["score"]: 
+                best_e["score"], best_e["comb"] = weighted_e, comb
+            if weighted_h > best_h["score"]: 
+                best_h["score"], best_h["comb"] = weighted_h, comb
+            
+            # 통합 점수 리스트 추가
+            total_scores.append({"comb": comb, "score": integrated})
 
-        df = pd.DataFrame(res)
-        if df.empty: return df
-        sort_col = {'eunseok': '은석_score', 'hyungsun': '형선_score', 'integrated': '통합_score'}[mode]
-        df = df.sort_values(by=sort_col, ascending=False).reset_index(drop=True)
-        df['순위'] = df.index + 1
-        return df
+        # 통합 점수 기준 내림차순 정렬
+        total_scores.sort(key=lambda x: x['score'], reverse=True)
 
-    # 5. CSV 저장
-    df1, df2, df3 = get_df('eunseok'), get_df('hyungsun'), get_df('integrated')
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        def f(c): return f"({c[0]}, {c[1]}, {c[2]}, {c[3]})" if c else "(-1, -1, -1, -1)"
+        
+        # 결과 추출
+        e_pred = f(best_e["comb"])
+        h_pred = f(best_h["comb"])
+        total_pred1 = f(total_scores[0]["comb"]) if len(total_scores) > 0 else "(-1, -1, -1, -1)"
+        total_pred2 = f(total_scores[1]["comb"]) if len(total_scores) > 1 else "(-1, -1, -1, -1)"
 
-    with open(output_path, 'w', encoding='utf-8-sig', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["[실제 정답 정보]", f"Mode: {SCORE_MODE}", f"Weights: {EUNSEOK_WEIGHT}:{HYUNGSUN_WEIGHT}"])
-        writer.writerow(TARGET_ATTRIBUTES)
-        writer.writerow(gt)
-        writer.writerow([])
-        for label, df in [("은석_pred", df1), ("형선_pred", df2), ("통합_분석", df3)]:
-            writer.writerow([f"### {label} 결과 ###"])
-            if not df.empty: df.to_csv(f, index=False)
-            else: writer.writerow(["결과 없음"])
-            writer.writerow([])
+        return e_pred, h_pred, total_pred1, total_pred2
 
-    return output_path
+    except Exception as e:
+        print(f"❌ 분석 실패: {e}")
+        return ("(-1, -1, -1, -1)", "(-1, -1, -1, -1)", "(-1, -1, -1, -1)", "(-1, -1, -1, -1)")
 
-# --- 사용 예시 ---
-# process_single_json_to_csv("input.json", "output.csv")
 
 # 출력 생성용 헬퍼 함수들
 # ==============================
@@ -868,130 +889,8 @@ def get_processed_videos(file_path):
         except Exception as e:
             print(f"⚠️ 기존 파일 로드 중 오류(무시하고 진행): {e}")
     return processed
-
-def get_top_10_from_csv(file_path):
-    """
-    CSV의 은석/형선 개별 섹션을 파싱하여 독립적인 합치 여부를 판별하고,
-    통합 분석 결과 섹션에서 Top-10 후보 리스트와 (P, F, A, B) 형식의 GT를 생성합니다.
-    """
-    # 인코딩 대응 (BOM 및 CP949)
-    try:
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            lines = f.readlines()
-    except:
-        with open(file_path, 'r', encoding='cp949') as f:
-            lines = f.readlines()
-
-    # 1. 각 섹션의 시작 위치 파악
-    eun_start, hye_start, total_start = -1, -1, -1
-    for i, line in enumerate(lines):
-        if "### 은석_pred 결과 ###" in line: eun_start = i + 1
-        elif "### 형선_pred 결과 ###" in line: hye_start = i + 1
-        elif "### 통합_분석 결과 ###" in line: total_start = i + 1
-
-    def get_top1_scenario_id(start_idx):
-        """해당 섹션의 최상단(1순위) 시나리오 조합 ID를 문자열로 반환"""
-        if start_idx == -1: return None
-        section_lines = []
-        for line in lines[start_idx:]:
-            if line.startswith("###") or not line.strip(): break
-            section_lines.append(line)
-
-        if not section_lines: return None
-
-        tmp_df = pd.read_csv(io.StringIO("".join(section_lines)))
-        if tmp_df.empty: return None
-
-        top = tmp_df.iloc[0]
-        return f"{int(top['accident_place'])}_{int(top['accident_place_feature'])}_{int(top['vehicle_a_progress_info'])}_{int(top['vehicle_b_progress_info'])}"
-
-    # 2. 전문가별 독립적 Top-1 추출 및 합치 여부 판별
-    eun_top1_id = get_top1_scenario_id(eun_start)
-    hye_top1_id = get_top1_scenario_id(hye_start)
-    total_top1_id = get_top1_scenario_id(total_start)
-    if eun_top1_id == hye_top1_id == total_top1_id and total_top1_id is not None:
-        # 양쪽 전문가와 통합 결과가 모두 일치 (1구간)
-        is_agreement = "Agreement"
-    elif eun_top1_id == total_top1_id and total_top1_id is not None:
-        # 은석 모델의 1위가 통합 1위인 경우 (2구간)
-        is_agreement = "Eunseok"
-    elif hye_top1_id == total_top1_id and total_top1_id is not None:
-        # 형선 모델의 1위가 통합 1위인 경우 (3구간)
-        is_agreement = "Hyeongseon"
-    else:
-        # 전문가 간의 의견이 완전히 갈리거나 통합 결과가 제3의 안인 경우 (4구간)
-        is_agreement = "Disagreement"
-
-    # 3. 통합 분석 결과 테이블 파싱
-    if total_start != -1:
-        total_lines = [line for line in lines[total_start:] if not line.strip().startswith("###")]
-        df = pd.read_csv(io.StringIO("".join(total_lines)))
-        df.columns = df.columns.str.strip()
-    else:
-        print(f"⚠️ 통합 분석 섹션을 찾을 수 없음: {file_path}")
-        return "Unknown", "[]", "Unknown"
-
-    # 데이터 타입 정수형 통일
-    res_id_keys = ['accident_place', 'accident_place_feature', 'vehicle_a_progress_info', 'vehicle_b_progress_info']
-    for k in res_id_keys:
-        df[k] = pd.to_numeric(df[k], errors='coerce').fillna(-1).astype(int)
-
-    # [수정] gt_rank 대신 (P, F, A, B) 형식의 gt_str 추출
-    gt_str = "Unknown"
-    # lines[1]은 컬럼명(accident_place...), lines[2]는 실제 값
-    if len(lines) > 2 and "accident_place" in lines[1]:
-        gt_header = lines[1].strip()
-        gt_values = lines[2].strip()
-        gt_df = pd.read_csv(io.StringIO(f"{gt_header}\n{gt_values}"))
-        if not gt_df.empty:
-            row = gt_df.iloc[0]
-            gt_str = f"({int(row['accident_place'])}, {int(row['accident_place_feature'])}, {int(row['vehicle_a_progress_info'])}, {int(row['vehicle_b_progress_info'])})"
-
-    # 통합 테이블 내에서의 모델별 최댓값 위치 찾기 (추천 태그용)
-    eunseok_best_idx = df['은석_score'].idxmax() if '은석_score' in df.columns else -1
-    hyeongseon_best_idx = df['형선_score'].idxmax() if '형선_score' in df.columns else -1
-
-    # 4. 마스터 가이드 명칭 결합 (Top-10로 제한)
-    top_10 = df.head(10).copy()
-    if 'master_df' in globals() and master_df is not None:
-        top_10 = pd.merge(top_10, master_df,
-                          left_on=res_id_keys,
-                          right_on=['사고장소_ID', '사고장소특징_ID', 'A진행방향_ID', 'B진행방향_ID'],
-                          how='left')
-
-    # 추천 태그 생성
-    def get_tag(idx):
-        tags = []
-        if idx == eunseok_best_idx: tags.append("Eunseok Top-1")
-        if idx == hyeongseon_best_idx: tags.append("Hyeongseon Top-1")
-        return ", ".join(tags)
-
-    top_10['recommendation'] = [get_tag(i) for i in top_10.index]
-    top_10 = top_10.fillna("")
-
-    # VLM 전달용 최종 컬럼 구성 (P, F, A, B 코드 정보 포함)
-    top_10['code_combination'] = top_10.apply(lambda r: f"({int(r['accident_place'])}, {int(r['accident_place_feature'])}, {int(r['vehicle_a_progress_info'])}, {int(r['vehicle_b_progress_info'])})", axis=1)
-
-    res_df = top_10.rename(columns={
-        '순위': 'Rank', '사고장소': 'place', '사고장소특징': 'feature',
-        'A진행방향': 'veh_a', 'B진행방향': 'veh_b'
-    })
-
-    final_cols = ['Rank', 'code_combination', 'place', 'feature', 'veh_a', 'veh_b', 'recommendation']
-
-    return gt_str, res_df[final_cols], is_agreement
-'''
-def find_file_paths(video_stem):
-    """파일명으로 실제 물리 경로(Video, Label, CSV)를 찾아 반환"""
-    for label_env, video_env in label_env_name_mapping.items():
-        v_path = os.path.join(base_video_root, video_env, f"{video_stem}.mp4")
-        if os.path.exists(v_path):
-            l_path = os.path.join(base_label_root, label_env, f"{video_stem}.json")
-            c_path = os.path.join(base_csv_root, label_env, f"{video_stem}.csv")
-            return v_path, l_path, c_path
-    return None, None, None
-'''
-def make_json(pred_str, mapping_path):
+    
+def make_json(pred_str):
     """
     pred_str (예: "(1, 11, 31, 34)")을 입력받아
     CSV 파일의 ID 컬럼들과 매칭되는 행을 찾아 JSON 딕셔너리로 반환합니다.
@@ -1005,11 +904,7 @@ def make_json(pred_str, mapping_path):
         return None
 
     # 2. CSV 파일 로드 (인코딩은 상황에 맞게 조정 가능)
-    try:
-        df = pd.read_csv(mapping_path, encoding='cp949')
-    except UnicodeDecodeError:
-        df = pd.read_csv(mapping_path, encoding='utf-8')
-
+    df = mapping_df
     # 컬럼명 공백 제거
     df.columns = df.columns.str.strip()
 
@@ -1050,12 +945,28 @@ def make_json(pred_str, mapping_path):
 
     return selected_explanation_case_json
 
-
-genai.configure(api_key=GOOGLE_API_KEY, transport='rest')
-#current_model_name = "gemini-3.1-pro-preview"
-current_model_name = "gemini-3-flash-preview"
-model_scorer = genai.GenerativeModel(model_name=current_model_name, system_instruction=system_instruction_score_only)
-model_analyzer = genai.GenerativeModel(model_name=current_model_name, system_instruction=system_instruction_explanation_direct)
+def get_pred_from_type(accident_type):
+    """
+    사고유형 번호를 입력받아 CSV에서 (장소, 특징, A기동, B기동) 코드를 찾아 반환합니다.
+    """
+    try:
+        df_mapping = mapping_df
+        #pd.read_csv(mapping_path, encoding='cp949')
+        # '사고유형' 컬럼에서 해당 번호 찾기
+        row = df_mapping[df_mapping['사고유형'] == accident_type]
+        
+        if not row.empty:
+            p = int(row['사고장소_ID'].values[0])
+            f = int(row['사고장소특징_ID'].values[0])
+            a = int(row['A진행방향_ID'].values[0])
+            b = int(row['B진행방향_ID'].values[0])
+            return f"({p}, {f}, {a}, {b})"
+        else:
+            print(f"⚠️ 매핑 테이블에서 사고유형 {accident_type}을 찾을 수 없습니다.")
+            return None
+    except Exception as e:
+        print(f"⚠️ C3D 매핑 중 오류 발생: {e}")
+        return None
 
 #매핑 정의
 label_env_name_mapping = {
@@ -1069,9 +980,59 @@ label_env_name_mapping = {
     "straight_road_label": "VS_차대차_영상_직선도로",
 }
 
-def run_explan_test(video_stem, idx, video_file, pred_str, gt_str=""):
-    selected_explanation_case_json = make_json(pred_str, mapping_path)
-
+model_analyzer = genai.GenerativeModel(model_name=current_model_name, system_instruction=system_instruction_explanation_direct)
+def run_explan_test(video_stem, tone, video_file, pred_str, gt_str):
+    selected_explanation_case_json = make_json(pred_str)
+    
+    tone_configs = {
+        "형선": {
+            "guide": "객관적이고 전문적인 어조. '입니다/습니다' 체 사용.",
+            "start_template": "본 사고는 {{날씨}} 기상 조건의 {{시간대}}에 발생한 건입니다.",
+            "end_template": "손해보험협회 과실비율 인정기준에 의거하여, {{A행동}} A 차량 {{A과실}}%, {{B행동}} B 차량 {{B과실}}%로 최종 산정됩니다."
+        },
+        "은석": {
+            "guide": "안타까움을 담은 따뜻한 어조. 운전자를 위로하는 표현 포함.",
+            "start_template": "안타깝게도 이 사고는 날씨가 {{날씨}} {{시간대}}에 발생한 사고입니다.",
+            "end_template": "많이 놀라셨겠지만, 손해보험협회의 기준에 따라 {{A행동}} A 차량이 {{A과실}}%, {{B행동}} B 차량이 {{B과실}}%로 산정되었습니다. 부디 잘 마무리되시길 바랍니다."
+        },
+        "수민": {
+            "guide": "차분하고 섬세한 어조. '~네요/더라고요' 등 부드러운 어미 활용.",
+            "start_template": "{{weather}} 날씨의 {{time_of_day}} 시간에 일어난 사고 당시 상황을 살펴보면 조금 안타까운 상황이네요.",
+            "end_template": "당시 상황을 종합해 손해보험협회의 기준과 비교해보면 {{A행동}} A 차량이 {{A과실}}%, {{B행동}} B 차량이 {{B과실}}%인 것으로 보여요. 세심한 주의가 필요한 찰나의 순간이었던 것 같네요."
+        }
+    }
+    
+    tone_configs2 = {
+        "형선": {
+            "guide": (
+                "당신은 감정이 없는 AI 분석관입니다. '입니다/합니다' 대신 문장을 '~함', '~임'으로 끝내거나 "
+                "매우 딱딱한 명사형 종결을 사용하세요. 수식어와 감정적 위로를 100% 제거하고 오직 법규와 데이터만 나열하십시오."
+            ),
+            "start_template": "[분석 개요] 기상 {{weather}}, 시간대 {{time_of_day}}. 사고 발생 정황 보고함.",
+            "end_template": "[최종 산정] 협회 인정기준 준용. {{a_vehicle_action}} A 차량 {{negligence_ratio_a}}% : {{b_vehicle_action}} B 차량 {{negligence_ratio_b}}%. 이상임."
+        },
+        "은석": {
+            "guide": (
+                "당신은 사고를 목격하고 너무 가슴 아파하는 친한 형/오빠입니다. "
+                "문장마다 '정말 당황하셨겠어요', '어휴, 다치지는 않으셨나요?' 같은 감탄사와 위로를 아낌없이 넣으세요. "
+                "법적인 이야기보다 운전자의 놀란 마음을 달래는 데 지면의 70%를 할애하세요."
+            ),
+            "start_template": "아이고... {{weather}} 날씨에 {{time_of_day}}였는데 갑자기 이런 일이 생겨서 얼마나 놀라셨을까요.",
+            "end_template": "많이 속상하시겠지만, 기준이 이렇다 보니 {{a_vehicle_action}} A 차량이 {{negligence_ratio_a}}%, {{b_vehicle_action}} B 차량이 {{negligence_ratio_b}}%로 나왔네요. 힘내시고 잘 해결되길 진심으로 빌게요."
+        },
+        "수민": {
+            "guide": (
+                "당신은 아주 섬세한 관찰자입니다. '~네요', '~더라고요' 같은 부드러운 종결 어미를 사용하세요. "
+                "결과보다는 '영상을 보니 ~하는 찰나였는데'와 같이 상황을 천천히 복기해주는 서술 방식을 택하세요. "
+                "여성스럽고 우아하며 차분한 톤을 유지하세요."
+            ),
+            "start_template": "{{weather}} 하늘 아래 {{time_of_day}}의 공기가 느껴지는 영상이네요. 조금은 아쉬운 순간이 담겨있더라고요.",
+            "end_template": "전체적인 흐름을 보니 {{a_vehicle_action}} 중인 A 차량이 {{negligence_ratio_a}}%, {{b_vehicle_action}} 중인 B 차량이 {{negligence_ratio_b}}%의 비율이 나왔네요. 참 아쉬운 찰나의 사고였던 것 같아요."
+        }
+    }
+    
+    selected_tone = tone_configs2[tone]
+    
     prompt_explanation_direct = f"""
     아래는 교통사고 블랙박스 영상에 대해 파이썬 후처리로 이미 확정된 사고유형 정보입니다.
     당신의 역할은 이 확정된 유형을 바탕으로, 영상을 참고해 사용자에게 읽기 쉬운 설명을 작성하는 것입니다.
@@ -1083,9 +1044,21 @@ def run_explan_test(video_stem, idx, video_file, pred_str, gt_str=""):
     - '내 차량', '블박 차량', '상대 차량', '가해차량', '피해차량' 표현은 사용하지 마십시오.
     - 영상에서 불확실한 내용은 단정하지 말고 '확인 어려움'으로 작성하십시오.
 
+    [어조 및 템플릿 지침]
+    - 전체적인 어조: {selected_tone['guide']}
+    - 리포트 시작 문구(형식 엄수): "{selected_tone['start_template']}"
+    - 리포트 마침 문구(형식 엄수): "{selected_tone['end_template']}"
+    - 중간 내용: 사고 정황을 상세히 분석하여 시작과 끝 문구 사이에 자연스럽게 배치하세요.
+    - 위 지침을 바탕으로 'explanation_text'를 작성하세요. 
+    - 반드시 시작/마침 문구의 {{ }} 부분을 위 데이터의 값으로 정확히 치환해야 합니다.
+
+    [추가 지시사항]
+    - 템플릿 내의 데이터({{weather}}, {{time_of_day}} 등)를 문장에 넣을 때, 한국어 조사(은/는, 이/가, 와/과)가 문맥에 맞도록 단어의 형태를 자연스럽게 변형하거나 문장을 매끄럽게 다듬으세요. 
+    - 예: "맑음 야간" (X) -> "맑은 날씨의 야간" 또는 "날씨가 맑았던 야간" (O)
+
     [확정된 유형 입력(JSON)]
     {selected_explanation_case_json}
-
+    
     [출력]
     {output_format_explanation_direct}
     """
@@ -1096,9 +1069,7 @@ def run_explan_test(video_stem, idx, video_file, pred_str, gt_str=""):
         response = None
         while attempt < max_retries:
             try:
-                print("hi")
                 response = model_analyzer.generate_content([prompt_explanation_direct, video_file])
-                print("bye")
                 break # 성공 시 루프 탈출
 
             except (http.client.RemoteDisconnected, Exception) as e:
@@ -1168,69 +1139,271 @@ def run_explan_test(video_stem, idx, video_file, pred_str, gt_str=""):
         })
     except Exception as e:
         print(str(e))
-        print("Why")
         return False
     return vlm_json.get("explanation_text")
 
-def run_score_test(video_stem, idx, video_file, c_path):
+model_scorer = genai.GenerativeModel(model_name=current_model_name, system_instruction=system_instruction_score_only)
+def run_score_test(video_stem, idx, video_file, input_data):
+    # 1. 데이터 준비 및 모델 결과 추출
+    es_pred, hs_pred, total_pred1, total_pred2 = get_all_predictions_simple(input_data)
+    
+    sm_pred = None
+    if "수민" in input_data:
+        accident_type = input_data["수민"].get("accident_type")
+        if accident_type is not None:
+            sm_pred = get_pred_from_type(accident_type)
+    
+    gt_str = "" # 서비스 모드
+    
+    # 2. 모델 합의 상태 결정
+    if es_pred == hs_pred:
+        is_agreement = "Agreement"
+    elif es_pred == total_pred1:
+        is_agreement = "Eunseok"
+    elif hs_pred == total_pred1:
+        is_agreement = "Hyeongseon"
+    else:
+        is_agreement = "Disagreement"
+
+    # 3. 중복을 제거한 후보 리스트 생성 (VLM 채점 대상)
+    unique_preds = []
+    candidates = [total_pred1, total_pred2, es_pred, hs_pred]
+    if sm_pred:
+        candidates.append(sm_pred)
+    for p in candidates:
+        if p not in unique_preds:
+            unique_preds.append(p)
+
+    # 4. res_data 생성 (DataFrame 구성을 위한 기초 데이터)
+    res_data = []
+    for i, pred in enumerate(unique_preds):
+        nums = re.findall(r'\d+', str(pred))
+        codes = [int(n) for n in nums[:4]] if len(nums) >= 4 else [0, 0, 0, 0]
+        
+        # 출처 태그 (예: "Integrated1/Eunseok")
+        tags = []
+        if pred == total_pred1: tags.append("Integrated1")
+        if pred == total_pred2: tags.append("Integrated2")
+        if pred == es_pred: tags.append("Eunseok")
+        if pred == hs_pred: tags.append("Hyeongseon")
+        if pred == sm_pred: tags.append("Sumin")
+        
+        source_tag = "/".join(sorted(list(set(tags))))
+
+        res_data.append({
+            "code_combination": pred,
+            "Rank": i + 1,
+            "recommendation": f"Top-{i+1}",
+            "place": codes[0], "feature": codes[1], "veh_a": codes[2], "veh_b": codes[3],
+            "source_tag": source_tag
+        })
+
+    # 5. DataFrame 및 VLM 입력 준비
+    pruned_df = pd.DataFrame(res_data)
+    g_p = g_f = g_a = g_b = None # 정답 미사용 모드
+    
+    def get_korean_desc(row):
+        try:
+            # mapping_df에서 4개 ID가 모두 일치하는 행 찾기
+            match = mapping_df[
+                (mapping_df['사고장소_ID'] == row['place']) & 
+                (mapping_df['사고장소특징_ID'] == row['feature']) & 
+                (mapping_df['A진행방향_ID'] == row['veh_a']) & 
+                (mapping_df['B진행방향_ID'] == row['veh_b'])
+            ]
+            if not match.empty:
+                r = match.iloc[0]
+                return f"{r['사고장소']}, {r['사고장소특징']}, {r['A진행방향']}, {r['B진행방향']}"
+        except Exception as e:
+        # 🚨 추가: 에러의 진짜 원인을 터미널에 붉은색으로 상세히 출력!
+            print(f"❌ [VLM 내부 에러 발생] ({video_stem}): {e}")
+            traceback.print_exc() 
+            return False, total_pred1, gt_str, (es_pred, hs_pred, total_pred1, total_pred2, sm_pred, [], [])
+    # 각 가설에 대해 한글 설명 컬럼 생성
+    pruned_df['korean_description'] = pruned_df.apply(get_korean_desc, axis=1)
+    
+    print(f"\n🚀 [분석 시작] {video_stem} (상태: {is_agreement})")
+
+    pruned_df = pruned_df.reset_index(drop=True)
+    pruned_df['hypothesis_id'] = [f"H{i+1}" for i in range(len(pruned_df))]
+    pruned_df['target_code_combination'] = pruned_df['code_combination']
+    pruned_df['target'] = pruned_df.apply(
+        lambda r: f"{r['code_combination']}: ({r['korean_description']})", axis=1
+    )
+    
+    selected_candidates_json = pruned_df[['hypothesis_id', 'source_tag', 'target_code_combination', 'target', 'place', 'feature', 'veh_a', 'veh_b']].to_json(orient='records', force_ascii=False)
+    
+    print(selected_candidates_json)
+
+    # 6. VLM 호출 (Score-only)
+    prompt_score_only = f"""
+    아래는 교통사고 블랙박스 영상에 대한 후보 가설 목록입니다.
+    이번 작업은 최종 선택이 아니라, 각 후보의 시각적 일치도 채점(score-only)입니다.
+
+    [입력값 유지 규칙]
+    - hypothesis_id, target_code_combination, target, source_tag는 입력값을 그대로 유지하십시오. 임의 수정 금지.
+    - hypothesis_scoring에는 입력된 모든 후보를 빠짐없이 포함하십시오.
+
+    [실행 지시]
+    - 모든 후보를 같은 기준으로 채점하십시오.
+    - 각 후보마다 counter_evidence를 최소 1개 작성하십시오.
+    (반증이 없으면 {{"time":"None","type":"None","detail":"None"}} 사용)
+    - evidence / environment_cues / counter_evidence / axis_comparison.notes 배열은 각각 최대 3개까지만 작성하십시오.
+
+    [추가 관찰 기준: Place 계층 판단]
+    - 아래 지침은 place/feature 관찰을 정리하기 위한 참고 기준입니다.
+    - hard-rule로 강제하지 말고, 영상에서 실제로 보이는 단서를 우선하십시오.
+    {place_hierarchy_instruction}
+
+    [후보 가설(JSON)]
+    {selected_candidates_json}
+
+    [출력]
+    {output_format_score_only}
+    """
+
+    try:
+        response = model_scorer.generate_content([prompt_score_only, video_file])
+        vlm_text = response.text
+        clean_json_str = re.sub(r"```json\s*|```\s*", "", vlm_text).strip()
+        vlm_json = json.loads(clean_json_str)
+        if isinstance(vlm_json, list): vlm_json = vlm_json[0]
+
+        h_scores = vlm_json.get("hypothesis_scoring", [])
+        h_score_map = {str(h.get("hypothesis_id", "")).strip(): h for h in h_scores}
+
+        # 7. 상세 데이터(h_data) 및 개별 점수 추출
+        h_data = {}
+        for i in range(1, 4): # H1, H2, H3 대응
+            if len(pruned_df) >= i:
+                row = pruned_df.iloc[i-1]
+                h = h_score_map.get(row['hypothesis_id'], {})
+                s = h.get("scores", {})
+                
+                # 점수 합산 로직
+                scores = [int(float(s.get(k, -1))) for k in ["place_score", "feature_score", "maneuver_score", "role_score"]]
+                raw_sum = sum(x for x in scores if x >= 0)
+                
+                h_data[f"가설{i}_점수합"] = raw_sum
+                h_data[f"가설{i}_입력코드"] = row['code_combination']
+                h_data[f"가설{i}_출처"] = row['source_tag']
+
+        # 8. 최종 랭킹 결정 (VLM 점수 기준)
+        # _pack_h와 _argmax_hid_by_sum는 외부 정의된 헬퍼 함수를 사용합니다.
+        h1_flat, h1m = _pack_h(1, pruned_df, h_score_map, g_p, g_f, g_a, g_b)
+        h2_flat, h2m = _pack_h(2, pruned_df, h_score_map, g_p, g_f, g_a, g_b)
+        h3_flat, h3m = _pack_h(3, pruned_df, h_score_map, g_p, g_f, g_a, g_b)
+        
+        _hrows_rank = {1: h1m, 2: h2m, 3: h3m}
+        top1_idx, top2_idx, top1_sum, top2_sum = _argmax_hid_by_sum(_hrows_rank, len(pruned_df))
+
+        # --------------------------------------------------------
+        # 9. [살려둔 로직] results_short_list 구성을 위한 레코드 생성
+        # --------------------------------------------------------
+        visual_obs = vlm_json.get("visual_observation", {})
+        pov_obs = vlm_json.get("pov_observation", {})
+        role_id = vlm_json.get("role_identification", {})
+
+        short_record = {
+            "video_id": video_stem,
+            "section_type": is_agreement,
+            "n_cands": len(pruned_df),
+            "top1_idx": top1_idx,
+            "top1_sum16": top1_sum,
+            "top2_sum16": top2_sum,
+            "margin": top1_sum - top2_sum if top2_sum >= 0 else 0,
+            "ego_pred": role_id.get("blackbox_is", "unknown"),
+            "cam_view": pov_obs.get("camera_view", ""),
+            # 가설별 플래툰(Flattened) 데이터 병합
+            **h1_flat, **h2_flat, **h3_flat
+        }
+        # 이 short_record를 외부의 리스트에 append 하거나 리턴에 포함할 수 있습니다.
+        
+        # 10. 최종 결과값 구성
+        # final_pred_code = h_data.get(f"가설{top1_idx}_입력코드", total_pred1)
+        
+        if is_agreement == "Agreement":
+            # 합의 상태라면 VLM 점수와 관계없이 알고리즘이 도출한 1순위(total_pred1)를 선택
+            # 보통 pruned_df의 첫 번째 행(H1)이 total_pred1입니다.
+            final_pred_code = total_pred1
+        else:
+            # 불일치 상태(Eunseok/Hyeongseon/Disagreement)에서만 VLM 점수를 따름
+            final_pred_code = h_data.get(f"가설{top1_idx}_입력코드", total_pred1)
+        
+        vlm_scores = [h_data.get(f"가설{i}_점수합", -1) for i in range(1, len(pruned_df)+1)]
+        vlm_sources = pruned_df['source_tag'].tolist()
+        
+        model_results = (es_pred, hs_pred, total_pred1, total_pred2, sm_pred, vlm_scores, vlm_sources)
+
+        return True, final_pred_code, gt_str, model_results
+
+    except Exception as e:
+        print(f"❌ 오류 ({video_stem}): {e}")
+        return False, total_pred1, gt_str, (es_pred, hs_pred, total_pred1, total_pred2, sm_pred, [], [])
+        
+def run_score_test_old(video_stem, idx, video_file, input_data):
     #global model_scorer, current_model_name
 
-    # 데이터 준비
-    gt_str, candidates_df, is_agreement = get_top_10_from_csv(c_path)
+    # 1. 데이터 준비 및 모델 결과 추출
+    es_pred, hs_pred, total_pred1, total_pred2 = get_all_predictions_simple(input_data)
     gt_str = ""
-    if is_agreement == "Agreement":
-        return False, candidates_df['code_combination'].iloc[0], gt_str
-        pruned_df = candidates_df[candidates_df['Rank'].isin([1, 2, 3])]
-    elif is_agreement == "Eunseok":
-        pruned_df = candidates_df[candidates_df['recommendation'].str.contains("Top-1", na=False)]
-    elif is_agreement == "Hyeongseon":
-        #current_section_instruction = common_instruction + "\n" + section_3_instruction_6_2
-        pruned_df = candidates_df[candidates_df['recommendation'].str.contains("Top-1", na=False)]
-    elif is_agreement == "Disagreement":
-        pruned_df = candidates_df[(candidates_df['recommendation'].str.contains("Top-1", na=False)) | (candidates_df['Rank'] == 1)]
-        # 동일한 코드가 중복 선택되는 것을 방지
-        pruned_df = pruned_df.drop_duplicates(subset=['code_combination'])
+    
+    # 2. 모델 합의 상태 결정
+    if es_pred == hs_pred:
+        is_agreement = "Agreement"
+        return False, [total_pred1, total_pred2], gt_str # 합의 시 즉시 반환
+    
+    if es_pred == total_pred1:
+        is_agreement = "Eunseok"
+    elif hs_pred == total_pred1:
+        is_agreement = "Hyeongseon"
+    else:
+        is_agreement = "Disagreement"
 
-    print(f"\n🚀 [분석 시작] {video_stem}")
+    # 3. 중복을 제거한 후보 리스트 생성
+    unique_preds = []
+    for p in [total_pred1, total_pred2, es_pred, hs_pred]:
+        if p not in unique_preds:
+            unique_preds.append(p)
 
-    # --- [입력 JSON 강화 로직 추가] ---
+    # 4. res_data 생성 (KeyError 방지의 핵심: 모든 컬럼을 여기서 생성)
+    res_data = []
+    for i, pred in enumerate(unique_preds):
+        nums = re.findall(r'\d+', str(pred))
+        codes = [int(n) for n in nums[:4]] if len(nums) >= 4 else [0, 0, 0, 0]
+
+        res_data.append({
+            "code_combination": pred,
+            "Rank": i + 1,
+            "recommendation": f"Top-{i+1}",
+            "place": codes[0],
+            "feature": codes[1],
+            "veh_a": codes[2],
+            "veh_b": codes[3],
+            "source_tag": "Integrated" if pred == total_pred1 else ("Eunseok" if pred == es_pred else "Hyeongseon")
+        })
+
+    # 5. DataFrame 생성 (이제 pruned_df는 항상 place, feature 등의 컬럼을 가짐)
+    pruned_df = pd.DataFrame(res_data)
+    
+    # [중요] 기존의 if is_agreement == "Eunseok": ... 로 시작하는 필터링 코드들은 
+    # 여기서 모두 삭제해야 합니다. 이미 위에서 필요한 후보만 담았습니다.
+
+    # 6. 후속 로직을 위한 변수 초기화 (g_p 에러 방지)
+    g_p = g_f = g_a = g_b = None 
+
+    print(f"\n🚀 [분석 시작] {video_stem} (상태: {is_agreement})")
+
+    # 7. 가설 ID 부여 및 규격화
     pruned_df = pruned_df.reset_index(drop=True)
-
-    # 1. hypothesis_id 부여 (H1, H2, H3)
     pruned_df['hypothesis_id'] = [f"H{i+1}" for i in range(len(pruned_df))]
-
-
-    def extract_code_tuple(s):
-        nums = re.findall(r'\d+', str(s))
-        return tuple(map(int, nums[:4])) if len(nums) >= 4 else None
-
-    #gt_tuple = extract_code_tuple(gt_str)
-    #is_gt_in_candidates = any(extract_code_tuple(c) == gt_tuple for c in pruned_df['code_combination'])
-
-    # 2. source_tag 생성 (추천 정보를 기반으로)
-    def get_source_tag(row):
-        rec = str(row.get('recommendation', ''))
-        rank = row.get('Rank', None)
-
-        if is_agreement == "Agreement":
-            if rank == 1:
-                return "Agreement_Rank_1"
-            elif rank == 2:
-                return "Agreement_Rank_2"
-            elif rank == 3:
-                return "Agreement_Rank_3"
-            return "Agreement_Rank_3"
-        if "Eunseok" in rec: return "Eunseok"
-        if "Hyeongseon" in rec: return "Hyeongseon"
-        return "Integrated" # Rank 1 등
-    pruned_df['source_tag'] = pruned_df.apply(get_source_tag, axis=1)
-
-    # 3. 필드명 매핑 및 규격화 (target 생성)
     pruned_df['target_code_combination'] = pruned_df['code_combination']
+    
+    # 이제 'place' 컬럼이 확실히 존재하므로 아래 apply가 성공합니다.
     pruned_df['target'] = pruned_df.apply(
         lambda r: f"{r['code_combination']}: ({r['place']}, {r['feature']}, {r['veh_a']}, {r['veh_b']})", axis=1
     )
-
+    
     # 4. VLM에 전달할 컬럼만 추출하여 JSON 변환
     vlm_input_cols = ['hypothesis_id', 'source_tag', 'target_code_combination', 'target', 'place', 'feature', 'veh_a', 'veh_b']
     selected_candidates_json = pruned_df[vlm_input_cols].to_json(orient='records', force_ascii=False)
