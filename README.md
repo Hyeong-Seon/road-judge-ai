@@ -102,6 +102,30 @@ road-judge-ai/
     ├── configs/              # 모델별 설정 파일 (*_config.py)
     ├── data/                 # 과실비율 산정 데이터셋 (*.csv)
     └── weights/              # (Git 제외) 모델 가중치 파일 (*.pth)
+## 📁 데이터셋 구조 (Monorepo)
+DATA(bb_1)_224_CPU
+├── train
+│   ├── label
+│   │   ├── 4way_no_signal_label
+│   │   ├── 4way_signal_label
+│   │   ├── highway_label
+│   │   ├── parking_lot_label
+│   │   ├── road_and_other_label
+│   │   ├── roundabout_label
+│   │   ├── straight_road_label
+│   │   └── t_junction_label      # (각 폴더에 .json 파일들이 들어있음)
+│   └── raw
+│       ├── 4way_no_signal_video
+│       ├── 4way_signal_video
+│       ├── highway_video
+│       ├── parking_lot_video
+│       ├── road_and_other_video
+│       ├── roundabout_video
+│       ├── straight_road_video
+│       └── t_junction_video      # (각 폴더에 .mp4 파일들이 들어있음)
+└── val
+    ├── label
+    └── raw
 ```
 *(주의: 8개의 `.pth` 모델 가중치 파일과 `.env` 파일은 보안 및 용량 문제로 Git에 업로드되지 않습니다.)*
 
