@@ -129,6 +129,15 @@ DATA(bb_1)_224_CPU
 ```
 *(주의: 8개의 `.pth` 모델 가중치 파일과 `.env` 파일은 보안 및 용량 문제로 Git에 업로드되지 않습니다.)*
 
+## 데이터 설명
+
+* [AI-Hub](https://aihub.or.kr/)
+  * 데이터 설명서
+    <br>[1-56 교통사고 영상 데이터_데이터설명서_v1.0.pdf](https://github.com/user-attachments/files/25592297/1-56._._v1.0.pdf)
+
+  * 데이터 사고유형별 index
+    <br>[Incident_Type_Classification_Table.csv](여기에_실제_파일_경로나_링크를_적어주세요)
+
 ---
 
 ## 🚀 설치 및 실행 (PM2 무중단 배포)
